@@ -573,6 +573,11 @@ impl Device {
             if stencil_bits > 0 {
                 attributes.flags.insert(ContextAttributeFlags::STENCIL);
             }
+            if context_descriptor.compatibility_profile {
+                attributes
+                    .flags
+                    .insert(ContextAttributeFlags::COMPATIBILITY_PROFILE);
+            }
 
             attributes
         }
