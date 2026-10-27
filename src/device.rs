@@ -2,8 +2,8 @@
 
 use crate::macros::{dispatch, enum_conversion};
 use crate::{
-    Adapter, Context, ContextAttributes, ContextDescriptor, ContextID, Error, GLApi, Surface,
-    SurfaceAccess, SurfaceInfo, SurfaceTexture, SurfaceType,
+    Adapter, BufferSurface, Context, ContextAttributes, ContextDescriptor, ContextID, Error, GLApi,
+    Surface, SurfaceAccess, SurfaceInfo, SurfaceTexture, SurfaceType, WindowSurface,
 };
 use euclid::default::Size2D;
 use glow::Texture;
@@ -228,8 +228,8 @@ impl Device {
     pub fn create_surface_texture(
         &self,
         context: &mut Context,
-        surface: Surface,
-    ) -> Result<SurfaceTexture, (Error, Surface)> {
+        surface: BufferSurface,
+    ) -> Result<SurfaceTexture, (Error, BufferSurface)> {
         dispatch!(Device, self, device => device.create_surface_texture(context, surface))
     }
 
@@ -259,7 +259,7 @@ impl Device {
         &self,
         context: &mut Context,
         surface_texture: SurfaceTexture,
-    ) -> Result<Surface, (Error, SurfaceTexture)> {
+    ) -> Result<BufferSurface, (Error, SurfaceTexture)> {
         dispatch!(Device, self, device => device.destroy_surface_texture(context, surface_texture))
     }
 
@@ -286,7 +286,11 @@ impl Device {
     ///
     /// The supplied context must match the context the surface was created with, or an
     /// `IncompatibleSurface` error is returned.
-    pub fn present_surface(&self, context: &Context, surface: &mut Surface) -> Result<(), Error> {
+    pub fn present_surface(
+        &self,
+        context: &Context,
+        surface: &mut WindowSurface,
+    ) -> Result<(), Error> {
         dispatch!(Device, self, device => device.present_surface(context, surface))
     }
 
@@ -303,7 +307,7 @@ impl Device {
     pub fn resize_surface(
         &self,
         context: &Context,
-        surface: &mut Surface,
+        surface: &mut WindowSurface,
         size: Size2D<i32>,
     ) -> Result<(), Error> {
         dispatch!(Device, self, device => device.resize_surface(context, surface, size))

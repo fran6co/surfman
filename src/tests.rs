@@ -455,7 +455,7 @@ pub fn test_surface_texture_blit_framebuffer() {
             .unwrap();
         let green_surface_texture = env
             .device
-            .create_surface_texture(&mut env.context, green_surface)
+            .create_surface_texture(&mut env.context, green_surface.try_into().unwrap())
             .unwrap();
 
         let main_surface = make_surface(&mut env.device, &env.context);
@@ -496,10 +496,11 @@ pub fn test_surface_texture_blit_framebuffer() {
         check_gl(&env.gl);
         env.gl.delete_framebuffer(green_framebuffer_object);
 
-        let mut green_surface = env
+        let mut green_surface: Surface = env
             .device
             .destroy_surface_texture(&mut env.context, green_surface_texture)
-            .unwrap();
+            .unwrap()
+            .into();
         env.device
             .destroy_surface(&mut env.context, &mut green_surface)
             .unwrap();
@@ -541,7 +542,7 @@ pub fn test_cross_device_surface_texture_blit_framebuffer() {
             .unwrap();
         let green_surface_texture = env
             .device
-            .create_surface_texture(&mut env.context, green_surface)
+            .create_surface_texture(&mut env.context, green_surface.try_into().unwrap())
             .unwrap();
 
         env.device.make_context_current(&env.context).unwrap();
@@ -567,10 +568,11 @@ pub fn test_cross_device_surface_texture_blit_framebuffer() {
         check_gl(&env.gl);
         env.gl.delete_framebuffer(green_framebuffer_object);
 
-        let mut green_surface = env
+        let mut green_surface: Surface = env
             .device
             .destroy_surface_texture(&mut env.context, green_surface_texture)
-            .unwrap();
+            .unwrap()
+            .into();
         other_device
             .destroy_surface(&mut other_context, &mut green_surface)
             .unwrap();
@@ -625,10 +627,10 @@ pub fn test_cross_thread_surface_texture_blit_framebuffer() {
         clear(&env.gl, &[255, 0, 0, 255]);
         assert_eq!(get_pixel_from_bottom_row(&env.gl), [255, 0, 0, 255]);
 
-        let green_surface = to_main_receiver.recv().unwrap();
+        let green_surface: Surface = to_main_receiver.recv().unwrap();
         let green_surface_texture = env
             .device
-            .create_surface_texture(&mut env.context, green_surface)
+            .create_surface_texture(&mut env.context, green_surface.try_into().unwrap())
             .unwrap();
 
         env.device.make_context_current(&env.context).unwrap();
@@ -658,7 +660,7 @@ pub fn test_cross_thread_surface_texture_blit_framebuffer() {
             .device
             .destroy_surface_texture(&mut env.context, green_surface_texture)
             .unwrap();
-        to_worker_sender.send(green_surface).unwrap();
+        to_worker_sender.send(Surface::from(green_surface)).unwrap();
 
         env.device.destroy_context(&mut env.context).unwrap();
     }
@@ -688,7 +690,7 @@ pub fn test_surface_texture_right_side_up() {
             .unwrap();
         let subsurface_texture = env
             .device
-            .create_surface_texture(&mut env.context, subsurface)
+            .create_surface_texture(&mut env.context, subsurface.try_into().unwrap())
             .unwrap();
 
         let main_surface = make_surface(&mut env.device, &env.context);
@@ -733,10 +735,11 @@ pub fn test_surface_texture_right_side_up() {
         check_gl(&env.gl);
         env.gl.delete_framebuffer(subframebuffer_object);
 
-        let mut subsurface = env
+        let mut subsurface: Surface = env
             .device
             .destroy_surface_texture(&mut env.context, subsurface_texture)
-            .unwrap();
+            .unwrap()
+            .into();
         env.device
             .destroy_surface(&mut env.context, &mut subsurface)
             .unwrap();

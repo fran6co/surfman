@@ -11,11 +11,14 @@ use crate::wgl::context::{
     ContextStatus, CurrentContextGuard, FramebufferGuard, NativeContext, WglContext,
     WglContextDescriptor, OPENGL_LIBRARY, WGL_EXTENSION_FUNCTIONS,
 };
-use crate::wgl::surface::{SurfaceDataGuard, WglSurface, WglSurfaceTexture, Win32Objects};
+use crate::wgl::surface::{
+    SurfaceDataGuard, WglBufferBinding, WglSurface, WglSurfaceTexture, WglWindowBinding,
+};
+use crate::windows::surface::{Direct3dBinding, Direct3dSurface, Win32Binding, Win32Surface};
 use crate::{
-    gl, gl_utils, Adapter, AdapterPreferences, Context, ContextAttributeFlags, ContextAttributes,
-    ContextDescriptor, Error, GLApi, GLVersion, Gl, PowerPreference, Surface, SurfaceAccess,
-    SurfaceInfo, SurfaceTexture, SurfaceType,
+    gl, gl_utils, Adapter, AdapterPreferences, BufferSurface, Context, ContextAttributeFlags,
+    ContextAttributes, ContextDescriptor, Error, GLApi, GLVersion, Gl, PowerPreference, Surface,
+    SurfaceAccess, SurfaceInfo, SurfaceTexture, SurfaceType, WindowSurface,
 };
 use euclid::default::Size2D;
 use glow::HasContext;
@@ -629,9 +632,14 @@ impl WglDevice {
             Ok(context) => context,
             Err(error) => return Err((error, surface)),
         };
-        let surface: WglSurface = surface.try_into()?;
+        #[allow(unreachable_patterns)]
+        let surface = match surface {
+            Surface::Window(WindowSurface::Win32(surface)) => WglSurface::Window(surface),
+            Surface::Buffer(BufferSurface::Direct3d(surface)) => WglSurface::Buffer(surface),
+            surface => return Err((Error::IncompatibleSurface, surface)),
+        };
 
-        if context.id != surface.context_id {
+        if context.id != surface.context_id() || !surface.is_wgl() {
             return Err((Error::IncompatibleSurface, surface.into()));
         }
 
@@ -681,7 +689,8 @@ impl WglDevice {
     pub fn present_bound_surface(&self, context: &mut Context) -> Result<(), Error> {
         let context: &mut WglContext = context.try_into()?;
         match &context.framebuffer {
-            Framebuffer::Surface(surface) => surface.present(),
+            Framebuffer::Surface(WglSurface::Window(surface)) => surface.present_wgl(),
+            Framebuffer::Surface(WglSurface::Buffer(_)) => Err(Error::NoWidgetAttached),
             _ => Ok(()),
         }
     }
@@ -702,14 +711,12 @@ impl WglDevice {
     pub(crate) fn get_context_dc<'a>(&self, context: &'a WglContext) -> DCGuard<'a> {
         unsafe {
             match &context.framebuffer {
-                Framebuffer::Surface(surface) => match surface.win32_objects {
-                    Win32Objects::Texture { .. } => {
-                        context.hidden_window.as_ref().unwrap().get_dc()
-                    }
-                    Win32Objects::Widget { window_handle } => {
-                        DCGuard::new(winuser::GetDC(window_handle), Some(window_handle))
-                    }
-                },
+                Framebuffer::Surface(WglSurface::Buffer(_)) => {
+                    context.hidden_window.as_ref().unwrap().get_dc()
+                }
+                Framebuffer::Surface(WglSurface::Window(surface)) => {
+                    DCGuard::new(winuser::GetDC(surface.window), Some(surface.window))
+                }
                 Framebuffer::External(()) | Framebuffer::None => {
                     context.hidden_window.as_ref().unwrap().get_dc()
                 }
@@ -876,20 +883,22 @@ impl WglDevice {
             // FIXME(pcwalton): Do we need to acquire the keyed mutex, or does the GL driver do
             // that?
 
-            Ok(WglSurface {
-                size: *size,
-                context_id: concrete_context.id,
-                win32_objects: Win32Objects::Texture {
-                    d3d11_texture,
-                    dxgi_share_handle,
-                    gl_dx_interop_object,
-                    gl_texture: Some(gl_texture),
-                    gl_framebuffer: Some(gl_framebuffer),
-                    renderbuffers,
-                },
-                destroyed: false,
-            }
-            .into())
+            Ok(Surface::Buffer(
+                Direct3dSurface {
+                    size: *size,
+                    context_id: concrete_context.id,
+                    share_handle: dxgi_share_handle,
+                    binding: Direct3dBinding::Wgl(WglBufferBinding {
+                        d3d11_texture,
+                        gl_dx_interop_object,
+                        gl_texture: Some(gl_texture),
+                        gl_framebuffer: Some(gl_framebuffer),
+                        renderbuffers,
+                        destroyed: false,
+                    }),
+                }
+                .into(),
+            ))
         }
     }
 
@@ -915,16 +924,18 @@ impl WglDevice {
                 set_dc_pixel_format(window_dc, pixel_format);
             }
 
-            Ok(WglSurface {
-                size: Size2D::new(
-                    widget_rect.right - widget_rect.left,
-                    widget_rect.bottom - widget_rect.top,
-                ),
-                context_id: context.id,
-                win32_objects: Win32Objects::Widget { window_handle },
-                destroyed: false,
-            }
-            .into())
+            Ok(Surface::Window(
+                Win32Surface {
+                    size: Size2D::new(
+                        widget_rect.right - widget_rect.left,
+                        widget_rect.bottom - widget_rect.top,
+                    ),
+                    context_id: context.id,
+                    window: window_handle,
+                    binding: Win32Binding::Wgl(WglWindowBinding { destroyed: false }),
+                }
+                .into(),
+            ))
         }
     }
 
@@ -944,46 +955,47 @@ impl WglDevice {
             .dx_interop_functions
             .as_ref()
             .expect("How did you make a surface without DX interop?");
-        let surface: &mut WglSurface = surface.try_into()?;
+        let context_id = context.wgl()?.id;
 
-        if context.wgl()?.id != surface.context_id {
-            return Err(Error::IncompatibleSurface);
-        }
+        #[allow(unreachable_patterns)]
+        match surface {
+            Surface::Window(WindowSurface::Win32(surface)) => {
+                if context_id != surface.context_id {
+                    return Err(Error::IncompatibleSurface);
+                }
+                surface.wgl_mut()?.destroyed = true;
+            }
+            Surface::Buffer(BufferSurface::Direct3d(surface)) => {
+                if context_id != surface.context_id {
+                    return Err(Error::IncompatibleSurface);
+                }
+                let binding = surface.wgl_mut()?;
 
-        let _guard = self.temporarily_make_context_current(context)?;
-        let context = context.wgl()?;
+                let _guard = self.temporarily_make_context_current(context)?;
+                let context = context.wgl()?;
 
-        unsafe {
-            match surface.win32_objects {
-                Win32Objects::Texture {
-                    ref mut gl_dx_interop_object,
-                    ref mut gl_texture,
-                    ref mut gl_framebuffer,
-                    ref mut renderbuffers,
-                    d3d11_texture: _,
-                    dxgi_share_handle: _,
-                } => {
-                    renderbuffers.destroy(&context.gl);
+                unsafe {
+                    binding.renderbuffers.destroy(&context.gl);
 
-                    if let Some(fbo) = gl_framebuffer.take() {
+                    if let Some(fbo) = binding.gl_framebuffer.take() {
                         gl_utils::destroy_framebuffer(&context.gl, fbo);
                     }
 
-                    if let Some(texture) = gl_texture.take() {
+                    if let Some(texture) = binding.gl_texture.take() {
                         context.gl.delete_texture(texture);
                     }
 
                     let ok = (dx_interop_functions.DXUnregisterObjectNV)(
                         self.gl_dx_interop_device,
-                        *gl_dx_interop_object,
+                        binding.gl_dx_interop_object,
                     );
                     assert_ne!(ok, FALSE);
-                    *gl_dx_interop_object = INVALID_HANDLE_VALUE;
+                    binding.gl_dx_interop_object = INVALID_HANDLE_VALUE;
                 }
-                Win32Objects::Widget { window_handle: _ } => {}
-            }
 
-            surface.destroyed = true;
+                binding.destroyed = true;
+            }
+            _ => return Err(Error::IncompatibleSurface),
         }
 
         Ok(())
@@ -1002,15 +1014,10 @@ impl WglDevice {
     pub fn create_surface_texture(
         &self,
         context: &mut Context,
-        surface: Surface,
-    ) -> Result<SurfaceTexture, (Error, Surface)> {
-        let surface: WglSurface = surface.try_into()?;
-        let dxgi_share_handle = match surface.win32_objects {
-            Win32Objects::Widget { .. } => return Err((Error::WidgetAttached, surface.into())),
-            Win32Objects::Texture {
-                dxgi_share_handle, ..
-            } => dxgi_share_handle,
-        };
+        surface: BufferSurface,
+    ) -> Result<SurfaceTexture, (Error, BufferSurface)> {
+        let surface: Direct3dSurface = surface.try_into()?;
+        let dxgi_share_handle = surface.share_handle;
 
         let dx_interop_functions = WGL_EXTENSION_FUNCTIONS
             .dx_interop_functions
@@ -1116,7 +1123,7 @@ impl WglDevice {
         &self,
         context: &mut Context,
         surface_texture: SurfaceTexture,
-    ) -> Result<Surface, (Error, SurfaceTexture)> {
+    ) -> Result<BufferSurface, (Error, SurfaceTexture)> {
         let dx_interop_functions = WGL_EXTENSION_FUNCTIONS
             .dx_interop_functions
             .as_ref()
@@ -1159,12 +1166,12 @@ impl WglDevice {
     }
 
     pub(crate) fn lock_surface(&self, surface: &WglSurface) {
-        let mut gl_dx_interop_object = match surface.win32_objects {
-            Win32Objects::Widget { .. } => return,
-            Win32Objects::Texture {
-                gl_dx_interop_object,
-                ..
-            } => gl_dx_interop_object,
+        let mut gl_dx_interop_object = match surface {
+            WglSurface::Buffer(surface) => match surface.wgl() {
+                Ok(binding) => binding.gl_dx_interop_object,
+                Err(_) => return,
+            },
+            WglSurface::Window(_) => return,
         };
 
         let dx_interop_functions = WGL_EXTENSION_FUNCTIONS
@@ -1183,12 +1190,12 @@ impl WglDevice {
     }
 
     pub(crate) fn unlock_surface(&self, surface: &WglSurface) {
-        let mut gl_dx_interop_object = match surface.win32_objects {
-            Win32Objects::Widget { .. } => return,
-            Win32Objects::Texture {
-                gl_dx_interop_object,
-                ..
-            } => gl_dx_interop_object,
+        let mut gl_dx_interop_object = match surface {
+            WglSurface::Buffer(surface) => match surface.wgl() {
+                Ok(binding) => binding.gl_dx_interop_object,
+                Err(_) => return,
+            },
+            WglSurface::Window(_) => return,
         };
 
         let dx_interop_functions = WGL_EXTENSION_FUNCTIONS
@@ -1230,18 +1237,19 @@ impl WglDevice {
     ///
     /// The supplied context must match the context the surface was created with, or an
     /// `IncompatibleSurface` error is returned.
-    pub fn present_surface(&self, _: &Context, surface: &mut Surface) -> Result<(), Error> {
-        surface.wgl()?.present()
+    pub fn present_surface(&self, _: &Context, surface: &mut WindowSurface) -> Result<(), Error> {
+        let surface: &mut Win32Surface = surface.try_into()?;
+        surface.present_wgl()
     }
 
     /// Resizes a widget surface.
     pub fn resize_surface(
         &self,
         _scontext: &Context,
-        surface: &mut Surface,
+        surface: &mut WindowSurface,
         size: Size2D<i32>,
     ) -> Result<(), Error> {
-        let surface: &mut WglSurface = surface.try_into()?;
+        let surface: &mut Win32Surface = surface.try_into()?;
         surface.resize(size);
         Ok(())
     }
@@ -1254,7 +1262,12 @@ impl WglDevice {
     /// 0, the default framebuffer, depending on platform.
     #[inline]
     pub fn surface_info(&self, surface: &Surface) -> SurfaceInfo {
-        surface.wgl().expect("Incompatible surface type").info()
+        #[allow(unreachable_patterns)]
+        match surface {
+            Surface::Window(WindowSurface::Win32(surface)) => surface.info(),
+            Surface::Buffer(BufferSurface::Direct3d(surface)) => surface.info(),
+            _ => panic!("Incompatible surface type"),
+        }
     }
 
     /// Returns the OpenGL texture object containing the contents of this surface.

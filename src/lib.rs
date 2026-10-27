@@ -32,6 +32,8 @@ mod gl_utils;
 #[cfg(any(android_platform, ohos_platform))]
 pub mod hardware_buffer;
 mod info;
+#[cfg(macos_platform)]
+pub mod macos;
 pub mod macros;
 #[cfg(free_unix)]
 pub mod mesa_surfaceless;
@@ -42,6 +44,8 @@ mod surface_texture;
 pub mod wayland;
 #[cfg(all(windows_platform, not(feature = "sm-no-wgl")))]
 pub mod wgl;
+#[cfg(windows_platform)]
+pub mod windows;
 #[cfg(x11_platform)]
 pub mod x11;
 
@@ -51,7 +55,9 @@ pub use crate::context_descriptor::ContextDescriptor;
 pub use crate::device::Device;
 pub use crate::error::{Error, WindowingApiError};
 pub use crate::info::{GLApi, GLVersion};
-pub use crate::surface::{Surface, SurfaceAccess, SurfaceID, SurfaceInfo, SurfaceType};
+pub use crate::surface::{
+    BufferSurface, Surface, SurfaceAccess, SurfaceID, SurfaceInfo, SurfaceType, WindowSurface,
+};
 pub use crate::surface_texture::SurfaceTexture;
 pub use adapter::{Adapter, AdapterPreferences, PowerPreference, RenderingPreference};
 pub(crate) use glow::{self as gl, Context as Gl};

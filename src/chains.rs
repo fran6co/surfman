@@ -23,8 +23,8 @@
 #![allow(missing_docs)]
 
 use crate::{
-    Context, ContextID, Device, Error, Surface, SurfaceAccess, SurfaceInfo, SurfaceTexture,
-    SurfaceType,
+    BufferSurface, Context, ContextID, Device, Error, Surface, SurfaceAccess, SurfaceInfo,
+    SurfaceTexture, SurfaceType,
 };
 use euclid::default::Size2D;
 use fnv::{FnvHashMap, FnvHashSet};
@@ -85,11 +85,17 @@ impl BackBuffer {
         device: &Device,
         context: &mut Context,
     ) -> Result<SurfaceTexture, Error> {
-        let surface = self.take_surface(device, context)?;
+        let surface = match BufferSurface::try_from(self.take_surface(device, context)?) {
+            Ok(surface) => surface,
+            Err((err, surface)) => {
+                let _ = self.replace_surface(device, context, surface);
+                return Err(err);
+            }
+        };
         device
             .create_surface_texture(context, surface)
             .map_err(|(err, surface)| {
-                let _ = self.replace_surface(device, context, surface);
+                let _ = self.replace_surface(device, context, surface.into());
                 err
             })
     }
@@ -123,7 +129,7 @@ impl BackBuffer {
         let surface = device
             .destroy_surface_texture(context, surface_texture)
             .map_err(|(err, _)| err)?;
-        self.replace_surface(device, context, surface)
+        self.replace_surface(device, context, surface.into())
     }
 }
 

@@ -7,9 +7,13 @@ use crate::base::egl::surface::{EGLBackedSurface, EGLBufferSurface};
 use crate::context::ContextID;
 use crate::egl::types::EGLint;
 use crate::free_unix::adapter::FreeUnixAdapter;
+use crate::free_unix::surface::PbufferSurface;
 use crate::mesa_surfaceless::context::{NativeContext, SurfacelessMesaContext};
-use crate::mesa_surfaceless::surface::{SurfacelessMesaSurface, SurfacelessMesaSurfaceTexture};
-use crate::{egl, Adapter, Context, EglContextDescriptor, Surface, SurfaceTexture};
+use crate::mesa_surfaceless::surface::SurfacelessMesaSurfaceTexture;
+use crate::{
+    egl, Adapter, BufferSurface, Context, EglContextDescriptor, Surface, SurfaceTexture,
+    WindowSurface,
+};
 use crate::{gl, ContextDescriptor};
 use crate::{ContextAttributes, Gl, SurfaceInfo};
 use crate::{Error, GLApi, SurfaceAccess, SurfaceType};
@@ -259,12 +263,18 @@ impl SurfacelessMesaDevice {
             Ok(context) => context,
             Err(error) => return Err((error, surface)),
         };
-        let surface: SurfacelessMesaSurface = surface.try_into()?;
+        let PbufferSurface(surface) = match surface {
+            Surface::Buffer(BufferSurface::Pbuffer(surface)) => surface,
+            surface => return Err((Error::IncompatibleSurface, surface)),
+        };
         unsafe {
             context
                 .0
-                .bind_surface(self.native_connection.egl_display, surface.0)
-                .map_err(|(err, surface)| (err, SurfacelessMesaSurface(surface).into()))
+                .bind_surface(
+                    self.native_connection.egl_display,
+                    EGLBackedSurface::Buffer(surface),
+                )
+                .map_err(|(err, surface)| (err, egl_surface_into_surface(surface)))
         }
     }
 
@@ -281,7 +291,7 @@ impl SurfacelessMesaDevice {
             context
                 .0
                 .unbind_surface(&context.1, self.native_connection.egl_display)
-                .map(|maybe_surface| maybe_surface.map(SurfacelessMesaSurface).map(Into::into))
+                .map(|maybe_surface| maybe_surface.map(egl_surface_into_surface))
         }
     }
 
@@ -354,17 +364,17 @@ impl SurfacelessMesaDevice {
         let context_attributes = self.context_descriptor_attributes(&context_descriptor);
         let context = context.surfaceless_mesa()?;
 
-        Ok(
-            SurfacelessMesaSurface(EGLBackedSurface::Buffer(EGLBufferSurface::new(
+        Ok(Surface::Buffer(
+            PbufferSurface(EGLBufferSurface::new(
                 &context.1,
                 self.native_connection.egl_display,
                 context.0.egl_context,
                 context.0.id,
                 &context_attributes,
                 size,
-            )))
+            ))
             .into(),
-        )
+        ))
     }
 
     /// Creates a surface texture from an existing generic surface for use with the given context.
@@ -380,8 +390,8 @@ impl SurfacelessMesaDevice {
     pub fn create_surface_texture(
         &self,
         context: &mut Context,
-        surface: Surface,
-    ) -> Result<SurfaceTexture, (Error, Surface)> {
+        surface: BufferSurface,
+    ) -> Result<SurfaceTexture, (Error, BufferSurface)> {
         let _guard = match self.temporarily_make_context_current(context) {
             Ok(guard) => guard,
             Err(err) => return Err((err, surface)),
@@ -391,17 +401,9 @@ impl SurfacelessMesaDevice {
             Ok(context) => context,
             Err(error) => return Err((error, surface)),
         };
-        let surface: SurfacelessMesaSurface = surface.try_into()?;
+        let PbufferSurface(surface): PbufferSurface = surface.try_into()?;
 
-        match surface.0 {
-            EGLBackedSurface::Buffer(surface) => {
-                Ok(SurfacelessMesaSurfaceTexture(surface.to_surface_texture(&context.1)).into())
-            }
-            surface => Err((
-                Error::WidgetAttached,
-                SurfacelessMesaSurface(surface).into(),
-            )),
-        }
+        Ok(SurfacelessMesaSurfaceTexture(surface.to_surface_texture(&context.1)).into())
     }
 
     /// Destroys a surface.
@@ -418,16 +420,12 @@ impl SurfacelessMesaDevice {
     ) -> Result<(), Error> {
         let egl_display = self.native_connection.egl_display;
         let context: &mut SurfacelessMesaContext = context.try_into()?;
-        let surface: &mut SurfacelessMesaSurface = surface.try_into()?;
-        match surface.0 {
-            EGLBackedSurface::Window(ref mut surface) => {
-                surface.destroy(egl_display, context.0.id)?;
+        match surface {
+            Surface::Buffer(BufferSurface::Pbuffer(PbufferSurface(surface))) => {
+                surface.destroy(&context.1, egl_display, context.0.id)
             }
-            EGLBackedSurface::Buffer(ref mut surface) => {
-                surface.destroy(&context.1, egl_display, context.0.id)?;
-            }
+            _ => Err(Error::IncompatibleSurface),
         }
-        Ok(())
     }
 
     /// Destroys a surface texture and returns the underlying surface.
@@ -441,17 +439,14 @@ impl SurfacelessMesaDevice {
         &self,
         context: &mut Context,
         surface_texture: SurfaceTexture,
-    ) -> Result<Surface, (Error, SurfaceTexture)> {
+    ) -> Result<BufferSurface, (Error, SurfaceTexture)> {
         let concrete_context = match context.surfaceless_mesa() {
             Ok(concrete_context) => concrete_context,
             Err(error) => return Err((error, surface_texture)),
         };
         let surface_texture: SurfacelessMesaSurfaceTexture = surface_texture.try_into()?;
         match self.temporarily_make_context_current(context) {
-            Ok(_guard) => Ok(SurfacelessMesaSurface(EGLBackedSurface::Buffer(
-                surface_texture.0.destroy(&concrete_context.1),
-            ))
-            .into()),
+            Ok(_guard) => Ok(PbufferSurface(surface_texture.0.destroy(&concrete_context.1)).into()),
             Err(err) => Err((err, surface_texture.into())),
         }
     }
@@ -463,24 +458,18 @@ impl SurfacelessMesaDevice {
     ///
     /// The supplied context must match the context the surface was created with, or an
     /// `IncompatibleSurface` error is returned.
-    pub fn present_surface(&self, context: &Context, surface: &mut Surface) -> Result<(), Error> {
-        let context = context.surfaceless_mesa()?;
-        let surface: &mut SurfacelessMesaSurface = surface.try_into()?;
-        surface
-            .0
-            .present(self.native_connection.egl_display, context.0.egl_context)
+    pub fn present_surface(&self, _: &Context, _: &mut WindowSurface) -> Result<(), Error> {
+        Err(Error::IncompatibleSurface)
     }
 
     /// Resizes a widget surface.
     pub fn resize_surface(
         &self,
-        _context: &Context,
-        surface: &mut Surface,
-        size: Size2D<i32>,
+        _: &Context,
+        _: &mut WindowSurface,
+        _: Size2D<i32>,
     ) -> Result<(), Error> {
-        let surface: &mut SurfacelessMesaSurface = surface.try_into()?;
-        surface.0.resize(size);
-        Ok(())
+        Err(Error::IncompatibleSurface)
     }
 
     /// Returns a pointer to the underlying surface data for reading or writing by the CPU.
@@ -504,10 +493,10 @@ impl SurfacelessMesaDevice {
     /// on the framebuffer object returned by this function. This framebuffer object may or not be
     /// 0, the default framebuffer, depending on platform.
     pub fn surface_info(&self, surface: &Surface) -> SurfaceInfo {
-        let surface = surface
-            .surfaceless_mesa()
-            .expect("Incompatible surface type");
-        surface.0.info()
+        match surface {
+            Surface::Buffer(BufferSurface::Pbuffer(PbufferSurface(surface))) => surface.info(),
+            _ => panic!("Incompatible surface type"),
+        }
     }
 
     /// Returns the OpenGL texture object containing the contents of this surface.
@@ -516,5 +505,12 @@ impl SurfacelessMesaDevice {
     #[inline]
     pub fn surface_texture_object(&self, surface_texture: &SurfaceTexture) -> Option<Texture> {
         surface_texture.surfaceless_mesa().ok()?.0.texture_object
+    }
+}
+
+fn egl_surface_into_surface(surface: EGLBackedSurface) -> Surface {
+    match surface {
+        EGLBackedSurface::Buffer(surface) => Surface::Buffer(PbufferSurface(surface).into()),
+        EGLBackedSurface::Window(_) => unreachable!("Surfaceless contexts have no window surfaces"),
     }
 }

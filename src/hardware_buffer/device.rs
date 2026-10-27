@@ -8,7 +8,10 @@ use crate::base::egl::error::ToWindowingApiError;
 use crate::base::egl::surface::ExternalEGLSurfaces;
 use crate::context::{ContextID, CREATE_CONTEXT_MUTEX};
 use crate::egl::types::{EGLConfig, EGLDisplay, EGLint};
-use crate::hardware_buffer::surface::{HardwareBufferSurface, SurfaceObjects};
+use crate::hardware_buffer::surface::{
+    buffer_surface, window_surface, HardwareBufferBufferSurface, HardwareBufferSurface,
+    HardwareBufferWindowSurface,
+};
 use crate::surface::Framebuffer;
 use crate::Adapter;
 use crate::{egl, ContextDescriptor, EglContextDescriptor, Surface};
@@ -206,8 +209,14 @@ impl HardwareBufferDevice {
             }
             let framebuffer = mem::replace(&mut context.framebuffer, Framebuffer::None);
 
-            if let Framebuffer::Surface(mut target) = framebuffer {
-                self.destroy_surface_inner(context, &mut target)?;
+            match framebuffer {
+                Framebuffer::Surface(HardwareBufferSurface::Window(mut target)) => {
+                    self.destroy_window_surface(context, &mut target)?;
+                }
+                Framebuffer::Surface(HardwareBufferSurface::Buffer(mut target)) => {
+                    self.destroy_buffer_surface(context, &mut target)?;
+                }
+                Framebuffer::External(_) | Framebuffer::None => {}
             }
         };
 
@@ -262,15 +271,13 @@ impl HardwareBufferDevice {
             let egl_context = context.egl_context;
 
             let (egl_draw_surface, egl_read_surface) = match context.framebuffer {
-                Framebuffer::Surface(HardwareBufferSurface {
-                    objects: SurfaceObjects::Window { egl_surface },
-                    ..
-                }) => (egl_surface, egl_surface),
+                Framebuffer::Surface(HardwareBufferSurface::Window(ref surface)) => {
+                    (surface.egl_surface, surface.egl_surface)
+                }
                 Framebuffer::External(ExternalEGLSurfaces { draw, read }) => (draw, read),
-                Framebuffer::Surface(HardwareBufferSurface {
-                    objects: SurfaceObjects::HardwareBuffer { .. },
-                    ..
-                }) => (context.pbuffer, context.pbuffer),
+                Framebuffer::Surface(HardwareBufferSurface::Buffer(_)) => {
+                    (context.pbuffer, context.pbuffer)
+                }
                 Framebuffer::None => (context.pbuffer, context.pbuffer),
             };
 
@@ -315,7 +322,7 @@ impl HardwareBufferDevice {
         };
         let new_surface: HardwareBufferSurface = new_surface.try_into()?;
 
-        if context.id != new_surface.context_id {
+        if context.id != new_surface.context_id() {
             return Err((Error::IncompatibleSurface, new_surface.into()));
         }
 
@@ -370,7 +377,10 @@ impl HardwareBufferDevice {
     pub fn present_bound_surface(&self, context: &mut Context) -> Result<(), Error> {
         let context = context.hardware_buffer()?;
         match &context.framebuffer {
-            Framebuffer::Surface(surface) => self.present_surface_inner(context, surface),
+            Framebuffer::Surface(HardwareBufferSurface::Window(surface)) => {
+                self.present_surface_inner(context, surface)
+            }
+            Framebuffer::Surface(HardwareBufferSurface::Buffer(_)) => Err(Error::NoWidgetAttached),
             _ => Ok(()),
         }
     }
@@ -401,8 +411,16 @@ impl HardwareBufferDevice {
         surface: &mut Surface,
     ) -> Result<(), Error> {
         let context: &mut HardwareBufferContext = context.try_into()?;
-        let surface: &mut HardwareBufferSurface = surface.try_into()?;
-        self.destroy_surface_inner(context, surface)
+        match surface {
+            Surface::Window(surface) => {
+                let surface: &mut HardwareBufferWindowSurface = surface.try_into()?;
+                self.destroy_window_surface(context, surface)
+            }
+            Surface::Buffer(surface) => {
+                let surface: &mut HardwareBufferBufferSurface = surface.try_into()?;
+                self.destroy_buffer_surface(context, surface)
+            }
+        }
     }
 
     /// Returns various information about the surface, including the framebuffer object needed to
@@ -412,10 +430,11 @@ impl HardwareBufferDevice {
     /// on the framebuffer object returned by this function. This framebuffer object may or not be
     /// 0, the default framebuffer, depending on platform.
     pub fn surface_info(&self, surface: &Surface) -> SurfaceInfo {
-        surface
-            .hardware_buffer()
-            .expect("Incompatible surface type")
-            .info()
+        match surface {
+            Surface::Window(surface) => window_surface(surface).map(|surface| surface.info()),
+            Surface::Buffer(surface) => buffer_surface(surface).map(|surface| surface.info()),
+        }
+        .expect("Incompatible surface type")
     }
 
     /// Returns the attributes that the context descriptor was created with.
@@ -493,15 +512,13 @@ impl HardwareBufferDevice {
             .hardware_buffer()
             .expect("Passed incorrect context type");
         let (egl_draw_surface, egl_read_surface) = match context.framebuffer {
-            Framebuffer::Surface(HardwareBufferSurface {
-                objects: SurfaceObjects::Window { egl_surface },
-                ..
-            }) => (egl_surface, egl_surface),
+            Framebuffer::Surface(HardwareBufferSurface::Window(ref surface)) => {
+                (surface.egl_surface, surface.egl_surface)
+            }
             Framebuffer::External(ExternalEGLSurfaces { draw, read }) => (draw, read),
-            Framebuffer::Surface(HardwareBufferSurface {
-                objects: SurfaceObjects::HardwareBuffer { .. },
-                ..
-            }) => (context.pbuffer, context.pbuffer),
+            Framebuffer::Surface(HardwareBufferSurface::Buffer(_)) => {
+                (context.pbuffer, context.pbuffer)
+            }
             Framebuffer::None => (context.pbuffer, context.pbuffer),
         };
 

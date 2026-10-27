@@ -2,24 +2,25 @@
 
 use crate::context::ContextID;
 use crate::macros::enum_conversion;
+use crate::Error;
 use euclid::default::Size2D;
 use raw_window_handle::WindowHandle;
 use std::fmt::{self, Display, Formatter};
 
-#[cfg(all(windows_platform, feature = "sm-angle"))]
-use crate::angle::surface::AngleSurface;
 #[cfg(macos_platform)]
-use crate::cgl::surface::CglSurface;
-#[cfg(any(android_platform, ohos_platform))]
-use crate::hardware_buffer::surface::HardwareBufferSurface;
+use crate::cgl::surface::CglWindowSurface;
 #[cfg(free_unix)]
-use crate::mesa_surfaceless::surface::SurfacelessMesaSurface;
+use crate::free_unix::surface::PbufferSurface;
+#[cfg(any(android_platform, ohos_platform))]
+use crate::hardware_buffer::surface::{HardwareBufferBufferSurface, HardwareBufferWindowSurface};
+#[cfg(macos_platform)]
+use crate::macos::surface::IoSurfaceSurface;
 #[cfg(wayland_platform)]
-use crate::wayland::surface::WaylandSurface;
-#[cfg(all(windows_platform, not(feature = "sm-no-wgl")))]
-use crate::wgl::surface::WglSurface;
+use crate::wayland::surface::WaylandWindowSurface;
+#[cfg(windows_platform)]
+use crate::windows::surface::{Direct3dSurface, Win32Surface};
 #[cfg(x11_platform)]
-use crate::x11::surface::X11Surface;
+use crate::x11::surface::X11WindowSurface;
 
 /// Various data about the surface.
 pub struct SurfaceInfo {
@@ -152,58 +153,178 @@ impl SurfaceAccess {
 /// Surfaces must be destroyed with the `destroy_surface()` method, or a panic will occur.
 #[derive(Debug)]
 pub enum Surface {
-    /// An ANGLE surface for Windows systems.
-    #[cfg(all(windows_platform, feature = "sm-angle"))]
-    Angle(AngleSurface),
-    /// A surface for Apple systems.
-    #[cfg(macos_platform)]
-    Cgl(CglSurface),
-    /// A hardware buffer surface for OHOS and Android systems.
-    #[cfg(any(android_platform, ohos_platform))]
-    HardwareBuffer(HardwareBufferSurface),
-    /// A surfaceless Mesa surface for X11 / Wayland systems.
-    #[cfg(free_unix)]
-    SurfacelessMesa(SurfacelessMesaSurface),
-    /// A surface for Wayland systems.
-    #[cfg(wayland_platform)]
-    Wayland(WaylandSurface),
-    /// A WGL surface for Windows systems.
-    #[cfg(all(windows_platform, not(feature = "sm-no-wgl")))]
-    Wgl(WglSurface),
-    /// A surface for X11 systems.
-    #[cfg(x11_platform)]
-    X11(X11Surface),
+    /// A surface displayed in a native widget, created with [`SurfaceType::Widget`].
+    Window(WindowSurface),
+    /// An off-screen surface, created with [`SurfaceType::Generic`].
+    Buffer(BufferSurface),
 }
 
-#[cfg(all(windows_platform, feature = "sm-angle"))]
-enum_conversion!(Surface, Angle, AngleSurface, angle, IncompatibleSurface);
-#[cfg(macos_platform)]
-enum_conversion!(Surface, Cgl, CglSurface, cgl, IncompatibleSurface);
-#[cfg(any(android_platform, ohos_platform))]
+/// A surface displayed in a native widget (window or view).
+///
+/// Only window surfaces can be presented.
+#[derive(Debug)]
+pub enum WindowSurface {
+    /// A surface displayed in an Android native window.
+    #[cfg(android_platform)]
+    Android(HardwareBufferWindowSurface),
+    /// A surface displayed in an AppKit view on macOS.
+    #[cfg(macos_platform)]
+    AppKit(CglWindowSurface),
+    /// A surface displayed in an OpenHarmony native window.
+    #[cfg(ohos_platform)]
+    Ohos(HardwareBufferWindowSurface),
+    /// A surface displayed in a Wayland surface.
+    #[cfg(wayland_platform)]
+    Wayland(WaylandWindowSurface),
+    /// A surface displayed in a Win32 window, used by ANGLE and WGL.
+    #[cfg(windows_platform)]
+    Win32(Win32Surface),
+    /// A surface displayed in an X11 window.
+    #[cfg(x11_platform)]
+    X11(X11WindowSurface),
+}
+
+/// An off-screen surface.
+///
+/// Only buffer surfaces can be wrapped in a [`crate::SurfaceTexture`] for reading from other
+/// contexts.
+#[derive(Debug)]
+pub enum BufferSurface {
+    /// A surface backed by an Android `AHardwareBuffer`.
+    #[cfg(android_platform)]
+    Android(HardwareBufferBufferSurface),
+    /// A surface backed by a Direct3D 11 texture, used by ANGLE and WGL.
+    #[cfg(windows_platform)]
+    Direct3d(Direct3dSurface),
+    /// A surface backed by an `IOSurface` on macOS.
+    #[cfg(macos_platform)]
+    IoSurface(IoSurfaceSurface),
+    /// A surface backed by an OpenHarmony `OH_NativeBuffer`.
+    #[cfg(ohos_platform)]
+    Ohos(HardwareBufferBufferSurface),
+    /// A surface backed by an EGL image, used by X11, Wayland and surfaceless Mesa.
+    #[cfg(free_unix)]
+    Pbuffer(PbufferSurface),
+}
+
+#[cfg(android_platform)]
 enum_conversion!(
-    Surface,
-    HardwareBuffer,
-    HardwareBufferSurface,
-    hardware_buffer,
+    WindowSurface,
+    Android,
+    HardwareBufferWindowSurface,
+    android,
     IncompatibleSurface
 );
-#[cfg(free_unix)]
+#[cfg(macos_platform)]
 enum_conversion!(
-    Surface,
-    SurfacelessMesa,
-    SurfacelessMesaSurface,
-    surfaceless_mesa,
+    WindowSurface,
+    AppKit,
+    CglWindowSurface,
+    app_kit,
+    IncompatibleSurface
+);
+#[cfg(ohos_platform)]
+enum_conversion!(
+    WindowSurface,
+    Ohos,
+    HardwareBufferWindowSurface,
+    ohos,
     IncompatibleSurface
 );
 #[cfg(wayland_platform)]
 enum_conversion!(
-    Surface,
+    WindowSurface,
     Wayland,
-    WaylandSurface,
+    WaylandWindowSurface,
     wayland,
     IncompatibleSurface
 );
-#[cfg(all(windows_platform, not(feature = "sm-no-wgl")))]
-enum_conversion!(Surface, Wgl, WglSurface, wgl, IncompatibleSurface);
+#[cfg(windows_platform)]
+enum_conversion!(
+    WindowSurface,
+    Win32,
+    Win32Surface,
+    win32,
+    IncompatibleSurface
+);
 #[cfg(x11_platform)]
-enum_conversion!(Surface, X11, X11Surface, x11, IncompatibleSurface);
+enum_conversion!(
+    WindowSurface,
+    X11,
+    X11WindowSurface,
+    x11,
+    IncompatibleSurface
+);
+
+#[cfg(android_platform)]
+enum_conversion!(
+    BufferSurface,
+    Android,
+    HardwareBufferBufferSurface,
+    android,
+    IncompatibleSurface
+);
+#[cfg(windows_platform)]
+enum_conversion!(
+    BufferSurface,
+    Direct3d,
+    Direct3dSurface,
+    direct3d,
+    IncompatibleSurface
+);
+#[cfg(macos_platform)]
+enum_conversion!(
+    BufferSurface,
+    IoSurface,
+    IoSurfaceSurface,
+    io_surface,
+    IncompatibleSurface
+);
+#[cfg(ohos_platform)]
+enum_conversion!(
+    BufferSurface,
+    Ohos,
+    HardwareBufferBufferSurface,
+    ohos,
+    IncompatibleSurface
+);
+#[cfg(free_unix)]
+enum_conversion!(
+    BufferSurface,
+    Pbuffer,
+    PbufferSurface,
+    pbuffer,
+    IncompatibleSurface
+);
+
+impl From<WindowSurface> for Surface {
+    fn from(surface: WindowSurface) -> Surface {
+        Surface::Window(surface)
+    }
+}
+
+impl From<BufferSurface> for Surface {
+    fn from(surface: BufferSurface) -> Surface {
+        Surface::Buffer(surface)
+    }
+}
+
+impl TryFrom<Surface> for WindowSurface {
+    type Error = (Error, Surface);
+    fn try_from(surface: Surface) -> Result<WindowSurface, Self::Error> {
+        match surface {
+            Surface::Window(surface) => Ok(surface),
+            Surface::Buffer(_) => Err((Error::NoWidgetAttached, surface)),
+        }
+    }
+}
+
+impl TryFrom<Surface> for BufferSurface {
+    type Error = (Error, Surface);
+    fn try_from(surface: Surface) -> Result<BufferSurface, Self::Error> {
+        match surface {
+            Surface::Buffer(surface) => Ok(surface),
+            Surface::Window(_) => Err((Error::WidgetAttached, surface)),
+        }
+    }
+}

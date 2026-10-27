@@ -8,11 +8,13 @@ use crate::base::egl::surface::{EGLBackedSurface, EGLBufferSurface, EGLWindowSur
 use crate::context::ContextID;
 use crate::egl::types::EGLint;
 use crate::free_unix::adapter::FreeUnixAdapter;
+use crate::free_unix::surface::PbufferSurface;
 use crate::surface::Framebuffer;
-use crate::wayland::surface::{WaylandSurface, WaylandSurfaceTexture};
+use crate::wayland::surface::{WaylandSurfaceTexture, WaylandWindowSurface};
 use crate::{
-    egl, gl, Adapter, Context, ContextAttributes, ContextDescriptor, EglContextDescriptor, Error,
-    GLApi, Gl, Surface, SurfaceAccess, SurfaceInfo, SurfaceTexture, SurfaceType,
+    egl, gl, Adapter, BufferSurface, Context, ContextAttributes, ContextDescriptor,
+    EglContextDescriptor, Error, GLApi, Gl, Surface, SurfaceAccess, SurfaceInfo, SurfaceTexture,
+    SurfaceType, WindowSurface,
 };
 use euclid::default::Size2D;
 use glow::Texture;
@@ -255,13 +257,21 @@ impl WaylandDevice {
             Ok(context) => context,
             Err(error) => return Err((error, surface)),
         };
-        let surface: WaylandSurface = surface.try_into()?;
+        let surface = match surface {
+            Surface::Window(WindowSurface::Wayland(WaylandWindowSurface(surface))) => {
+                EGLBackedSurface::Window(surface)
+            }
+            Surface::Buffer(BufferSurface::Pbuffer(PbufferSurface(surface))) => {
+                EGLBackedSurface::Buffer(surface)
+            }
+            surface => return Err((Error::IncompatibleSurface, surface)),
+        };
 
         unsafe {
             context
                 .0
-                .bind_surface(self.native_connection.egl_display, surface.0)
-                .map_err(|(err, surface)| (err, WaylandSurface(surface).into()))
+                .bind_surface(self.native_connection.egl_display, surface)
+                .map_err(|(err, surface)| (err, egl_surface_into_surface(surface)))
         }
     }
 
@@ -278,7 +288,7 @@ impl WaylandDevice {
             context
                 .0
                 .unbind_surface(&context.1, self.native_connection.egl_display)
-                .map(|maybe_surface| maybe_surface.map(WaylandSurface).map(Into::into))
+                .map(|maybe_surface| maybe_surface.map(egl_surface_into_surface))
         }
     }
 
@@ -370,17 +380,17 @@ impl WaylandDevice {
         let context_attributes = self.context_descriptor_attributes(&context_descriptor);
         let context = context.wayland()?;
 
-        Ok(
-            WaylandSurface(EGLBackedSurface::Buffer(EGLBufferSurface::new(
+        Ok(Surface::Buffer(
+            PbufferSurface(EGLBufferSurface::new(
                 &context.1,
                 self.native_connection.egl_display,
                 context.0.egl_context,
                 context.0.id,
                 &context_attributes,
                 size,
-            )))
+            ))
             .into(),
-        )
+        ))
     }
 
     unsafe fn create_window_surface(
@@ -401,16 +411,16 @@ impl WaylandDevice {
         );
         let context = context.wayland()?;
 
-        Ok(
-            WaylandSurface(EGLBackedSurface::Window(EGLWindowSurface::new(
+        Ok(Surface::Window(
+            WaylandWindowSurface(EGLWindowSurface::new(
                 self.native_connection.egl_display,
                 egl_config,
                 egl_window as *mut c_void,
                 context.0.id,
                 size,
-            )))
+            ))
             .into(),
-        )
+        ))
     }
 
     /// Creates a surface texture from an existing generic surface for use with the given context.
@@ -426,8 +436,8 @@ impl WaylandDevice {
     pub fn create_surface_texture(
         &self,
         context: &mut Context,
-        surface: Surface,
-    ) -> Result<SurfaceTexture, (Error, Surface)> {
+        surface: BufferSurface,
+    ) -> Result<SurfaceTexture, (Error, BufferSurface)> {
         let _guard = match self.temporarily_make_context_current(context) {
             Ok(guard) => guard,
             Err(err) => return Err((err, surface)),
@@ -437,14 +447,9 @@ impl WaylandDevice {
             Ok(context) => context,
             Err(error) => return Err((error, surface)),
         };
-        let surface: WaylandSurface = surface.try_into()?;
+        let PbufferSurface(surface): PbufferSurface = surface.try_into()?;
 
-        match surface.0 {
-            EGLBackedSurface::Buffer(surface) => {
-                Ok(WaylandSurfaceTexture(surface.to_surface_texture(&context.1)).into())
-            }
-            surface => Err((Error::WidgetAttached, WaylandSurface(surface).into())),
-        }
+        Ok(WaylandSurfaceTexture(surface.to_surface_texture(&context.1)).into())
     }
 
     /// Destroys a surface.
@@ -461,18 +466,18 @@ impl WaylandDevice {
     ) -> Result<(), Error> {
         let egl_display = self.native_connection.egl_display;
         let context = context.wayland()?;
-        let surface: &mut WaylandSurface = surface.try_into()?;
-        match surface.0 {
-            EGLBackedSurface::Window(ref mut surface) => {
+        match surface {
+            Surface::Window(WindowSurface::Wayland(WaylandWindowSurface(surface))) => {
                 let wayland_egl_window = surface.destroy(egl_display, context.0.id)?;
                 unsafe {
                     let wayland_egl_window = wayland_egl_window as *mut wl_egl_window;
                     (wayland_egl_handle().wl_egl_window_destroy)(wayland_egl_window);
                 }
             }
-            EGLBackedSurface::Buffer(ref mut surface) => {
+            Surface::Buffer(BufferSurface::Pbuffer(PbufferSurface(surface))) => {
                 surface.destroy(&context.1, egl_display, context.0.id)?;
             }
+            _ => return Err(Error::IncompatibleSurface),
         }
         Ok(())
     }
@@ -488,7 +493,7 @@ impl WaylandDevice {
         &self,
         context: &mut Context,
         surface_texture: SurfaceTexture,
-    ) -> Result<Surface, (Error, SurfaceTexture)> {
+    ) -> Result<BufferSurface, (Error, SurfaceTexture)> {
         let concrete_context = match context.wayland() {
             Ok(concrete_context) => concrete_context,
             Err(error) => return Err((error, surface_texture)),
@@ -496,10 +501,7 @@ impl WaylandDevice {
         let surface_texture: WaylandSurfaceTexture = surface_texture.try_into()?;
 
         match self.temporarily_make_context_current(context) {
-            Ok(_guard) => Ok(WaylandSurface(EGLBackedSurface::Buffer(
-                surface_texture.0.destroy(&concrete_context.1),
-            ))
-            .into()),
+            Ok(_guard) => Ok(PbufferSurface(surface_texture.0.destroy(&concrete_context.1)).into()),
             Err(err) => Err((err, surface_texture.into())),
         }
     }
@@ -511,29 +513,26 @@ impl WaylandDevice {
     ///
     /// The supplied context must match the context the surface was created with, or an
     /// `IncompatibleSurface` error is returned.
-    pub fn present_surface(&self, context: &Context, surface: &mut Surface) -> Result<(), Error> {
+    pub fn present_surface(
+        &self,
+        context: &Context,
+        surface: &mut WindowSurface,
+    ) -> Result<(), Error> {
         let context = context.wayland()?;
-        let surface: &mut WaylandSurface = surface.try_into()?;
-        surface
-            .0
-            .present(self.native_connection.egl_display, context.0.egl_context)
+        let WaylandWindowSurface(surface): &mut WaylandWindowSurface = surface.try_into()?;
+        surface.present(self.native_connection.egl_display, context.0.egl_context)
     }
 
     /// Resizes a widget surface.
     pub fn resize_surface(
         &self,
         _context: &Context,
-        surface: &mut Surface,
+        surface: &mut WindowSurface,
         size: Size2D<i32>,
     ) -> Result<(), Error> {
-        let surface: &mut WaylandSurface = surface.try_into()?;
-        match surface.0 {
-            EGLBackedSurface::Window(ref mut surface) => {
-                surface.resize_for_wayland(size);
-                Ok(())
-            }
-            EGLBackedSurface::Buffer(_) => Err(Error::NoWidgetAttached),
-        }
+        let WaylandWindowSurface(surface): &mut WaylandWindowSurface = surface.try_into()?;
+        surface.resize_for_wayland(size);
+        Ok(())
     }
 
     /// Returns a pointer to the underlying surface data for reading or writing by the CPU.
@@ -557,8 +556,13 @@ impl WaylandDevice {
     /// on the framebuffer object returned by this function. This framebuffer object may or not be
     /// 0, the default framebuffer, depending on platform.
     pub fn surface_info(&self, surface: &Surface) -> SurfaceInfo {
-        let surface = surface.wayland().expect("Incompatible surface type");
-        surface.0.info()
+        match surface {
+            Surface::Window(WindowSurface::Wayland(WaylandWindowSurface(surface))) => {
+                surface.info()
+            }
+            Surface::Buffer(BufferSurface::Pbuffer(PbufferSurface(surface))) => surface.info(),
+            _ => panic!("Incompatible surface type"),
+        }
     }
 
     /// Returns the OpenGL texture object containing the contents of this surface.
@@ -567,5 +571,12 @@ impl WaylandDevice {
     #[inline]
     pub fn surface_texture_object(&self, surface_texture: &SurfaceTexture) -> Option<Texture> {
         surface_texture.wayland().ok()?.0.texture_object
+    }
+}
+
+fn egl_surface_into_surface(surface: EGLBackedSurface) -> Surface {
+    match surface {
+        EGLBackedSurface::Window(surface) => Surface::Window(WaylandWindowSurface(surface).into()),
+        EGLBackedSurface::Buffer(surface) => Surface::Buffer(PbufferSurface(surface).into()),
     }
 }
