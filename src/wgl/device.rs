@@ -380,7 +380,7 @@ impl WglDevice {
                 glrc,
                 id: *next_context_id,
                 gl,
-                hidden_window: Some(hidden_window),
+                offscreen_dc: OffscreenDC::HiddenWindow(hidden_window),
                 framebuffer: Framebuffer::None,
                 status: ContextStatus::Owned,
             };
@@ -398,15 +398,36 @@ impl WglDevice {
         &self,
         native_context: NativeContext,
     ) -> Result<Context, Error> {
+        self.wrap_native_context(
+            native_context,
+            OffscreenDC::HiddenWindow(HiddenWindow::new()),
+        )
+    }
+
+    /// Wraps an `HGLRC` in a `surfman` context that is made current on `dc`, and returns it.
+    ///
+    /// Neither the `HGLRC` nor `dc` is retained. It is the caller's responsibility to make sure
+    /// both stay valid until this `Context` is destroyed.
+    pub unsafe fn create_context_from_native_context_and_dc(
+        &self,
+        native_context: NativeContext,
+        dc: HDC,
+    ) -> Result<Context, Error> {
+        self.wrap_native_context(native_context, OffscreenDC::Native(dc))
+    }
+
+    unsafe fn wrap_native_context(
+        &self,
+        native_context: NativeContext,
+        offscreen_dc: OffscreenDC,
+    ) -> Result<Context, Error> {
         let mut next_context_id = CREATE_CONTEXT_MUTEX.lock().unwrap();
-        let hidden_window = HiddenWindow::new();
 
         // Load the GL functions.
         let gl = {
-            let hidden_window_dc = hidden_window.get_dc();
-            let dc = hidden_window_dc.dc;
+            let dc_guard = offscreen_dc.get_dc();
             let _guard = CurrentContextGuard::new();
-            let ok = wglMakeCurrent(dc, native_context.0);
+            let ok = wglMakeCurrent(dc_guard.dc, native_context.0);
             assert_ne!(ok, FALSE);
             Gl::from_loader_function(get_proc_address)
         };
@@ -415,7 +436,7 @@ impl WglDevice {
             glrc: native_context.0,
             id: *next_context_id,
             gl,
-            hidden_window: Some(hidden_window),
+            offscreen_dc,
             framebuffer: Framebuffer::External(()),
             status: ContextStatus::Referenced,
         };
@@ -699,16 +720,12 @@ impl WglDevice {
         unsafe {
             match &context.framebuffer {
                 Framebuffer::Surface(surface) => match surface.win32_objects {
-                    Win32Objects::Texture { .. } => {
-                        context.hidden_window.as_ref().unwrap().get_dc()
-                    }
+                    Win32Objects::Texture { .. } => context.offscreen_dc.get_dc(),
                     Win32Objects::Widget { window_handle } => {
                         DCGuard::new(winuser::GetDC(window_handle), Some(window_handle))
                     }
                 },
-                Framebuffer::External(()) | Framebuffer::None => {
-                    context.hidden_window.as_ref().unwrap().get_dc()
-                }
+                Framebuffer::External(()) | Framebuffer::None => context.offscreen_dc.get_dc(),
             }
         }
     }
@@ -1291,6 +1308,21 @@ pub(crate) struct HiddenWindow {
     join_handle: Option<JoinHandle<()>>,
 }
 
+/// The DC a context is made current on when it doesn't render to a window.
+pub(crate) enum OffscreenDC {
+    HiddenWindow(HiddenWindow),
+    Native(HDC),
+}
+
+impl OffscreenDC {
+    pub(crate) fn get_dc(&self) -> DCGuard<'_> {
+        match self {
+            OffscreenDC::HiddenWindow(hidden_window) => hidden_window.get_dc(),
+            OffscreenDC::Native(dc) => DCGuard::new(*dc, None),
+        }
+    }
+}
+
 pub(crate) struct DCGuard<'a> {
     pub(crate) dc: HDC,
     window: Option<HWND>,
@@ -1424,5 +1456,54 @@ pub(crate) fn set_dc_pixel_format(dc: HDC, pixel_format: c_int) {
         assert_ne!(pixel_format_count, 0);
         let ok = wingdi::SetPixelFormat(dc, pixel_format, &pixel_format_descriptor);
         assert_ne!(ok, FALSE);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg_attr(not(feature = "sm-test"), test)]
+    pub fn test_native_context_is_made_current_on_its_dc() {
+        use crate::wgl::connection::WglConnection;
+        use winapi::um::wingdi::wglGetCurrentDC;
+
+        let connection = WglConnection::new().unwrap();
+        let adapter = connection
+            .create_adapter(AdapterPreferences {
+                power: PowerPreference::LowPower,
+                ..Default::default()
+            })
+            .unwrap();
+        let device = match connection.create_device(&adapter) {
+            Ok(device) => device,
+            Err(Error::RequiredExtensionUnavailable) => {
+                // Can't run this test on this hardware.
+                return;
+            }
+            Err(error) => panic!("Failed to create device: {error:?}"),
+        };
+
+        let context_descriptor = device
+            .create_context_descriptor(&ContextAttributes {
+                version: GLVersion::new(3, 0),
+                flags: ContextAttributeFlags::empty(),
+            })
+            .unwrap();
+
+        let mut context = device.create_context(&context_descriptor, None).unwrap();
+        device.make_context_current(&context).unwrap();
+        let dc = unsafe { wglGetCurrentDC() };
+
+        let mut wrapped_context = unsafe {
+            device.create_context_from_native_context_and_dc(NativeContext::current().unwrap(), dc)
+        }
+        .unwrap();
+        device.make_no_context_current().unwrap();
+        device.make_context_current(&wrapped_context).unwrap();
+        assert_eq!(unsafe { wglGetCurrentDC() }, dc);
+
+        device.destroy_context(&mut wrapped_context).unwrap();
+        device.destroy_context(&mut context).unwrap();
     }
 }

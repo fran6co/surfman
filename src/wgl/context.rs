@@ -2,7 +2,7 @@
 //
 //! Wrapper for WGL contexts on Windows.
 
-use super::device::HiddenWindow;
+use super::device::OffscreenDC;
 use crate::gl;
 use crate::surface::Framebuffer;
 use crate::wgl::surface::WglSurface;
@@ -98,7 +98,7 @@ pub struct WglContext {
     pub(crate) glrc: HGLRC,
     pub(crate) id: ContextID,
     pub(crate) gl: Gl,
-    pub(crate) hidden_window: Option<HiddenWindow>,
+    pub(crate) offscreen_dc: OffscreenDC,
     pub(crate) framebuffer: Framebuffer<WglSurface, ()>,
     pub(crate) status: ContextStatus,
 }
