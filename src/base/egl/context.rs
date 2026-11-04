@@ -230,7 +230,7 @@ impl EGLBackedContext {
         egl_display: EGLDisplay,
         surface: EGLBackedSurface,
     ) -> Result<(), (Error, EGLBackedSurface)> {
-        if self.id != surface.context_id {
+        if self.id != surface.context_id() {
             return Err((Error::IncompatibleSurface, surface));
         }
 
